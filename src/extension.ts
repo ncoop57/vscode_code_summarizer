@@ -14,7 +14,7 @@ async function loadLang() {
 	return parser;
 }
 
-function genComment(code: string, paramNames: Array<string>, isVoid: boolean, url: string, editor: vscode.TextEditor, selection: vscode.Selection) {
+function genComment(code: string, method: boolean, paramNames: Array<string>, isVoid: boolean, url: string, editor: vscode.TextEditor, selection: vscode.Selection) {
 	if (!editor) {
 		return;
 	}
@@ -24,29 +24,46 @@ function genComment(code: string, paramNames: Array<string>, isVoid: boolean, ur
 		// eslint-disable-next-line @typescript-eslint/naming-convention
 		'Content-Type': 'application/json'
 	};
-	axios.post(String(url), {code: code}, {
+	axios.post(String(url), { code: code }, {
 		headers: headers
 	})
-	.then(function (response) {
-		// From https://stackoverflow.com/questions/53585737/vscode-extension-how-to-alter-files-text
-		// Take response from server and place generated comment above the highlighted code
-		if (editor) {
-			editor.edit(editBuilder => {
-				let javaDoc = '/**\n' + ' * ' + response.data + '\n';
-				for (let i = 0; i < paramNames.length; i++) {
-					javaDoc += ' * @param ' + paramNames[i] + '\n';
-				}
-				if (!isVoid) {
-					javaDoc += ' * @return \n';
-				}
-				javaDoc += '*/\n';
-				editBuilder.insert(selection.start, javaDoc);
-			});
-		}
-	});
+		.then(function (response) {
+			// From https://stackoverflow.com/questions/53585737/vscode-extension-how-to-alter-files-text
+			// Take response from server and place generated comment above the highlighted code
+			if (editor) {
+				editor.edit(editBuilder => {
+					let comment = '';
+
+					if (method) {
+						comment = '/**\n' + ' '.repeat(selection.start.character) + ' *' + response.data + '\n';
+						for (let i = 0; i < paramNames.length; i++) {
+							comment += ' '.repeat(selection.start.character) + ' * @param ' + paramNames[i] + '\n';
+						}
+						if (!isVoid) {
+							comment += ' '.repeat(selection.start.character) + ' * @return \n';
+						}
+						comment += ' '.repeat(selection.start.character) + '*/\n';
+					} else {
+						comment = '//' + response.data + '\n';
+					}
+					editBuilder.insert(selection.start, comment + ' '.repeat(selection.start.character));
+				});
+			}
+		});
 }
 
-function isVoid(tree: Parser.Tree) {
+function isMethod(treeString: string) {
+	console.log(treeString);
+	const idxFormalParams = treeString.indexOf('(formal_parameter');
+	if (idxFormalParams === -1) { return false; }
+
+	const idxClassBody = treeString.indexOf('class_body');
+	if (idxClassBody === -1) { return true; }
+	else if (idxClassBody < idxFormalParams) { return false; }
+	else { return true; }
+}
+
+function isVoidMethod(tree: Parser.Tree) {
 	let signature = tree.rootNode.children[0].children[0];
 	for (let i = 0; i < signature.children.length; i++) {
 		if (signature.children[i].type === 'void_type') {
@@ -82,7 +99,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		const lang = await Parser.Language.load('./src/tree-sitter-java.wasm');
 		const parser = new Parser();
 		parser.setLanguage(lang);
-		
+
 
 		const document = editor.document;
 		const selection = editor.selection;
@@ -90,8 +107,16 @@ export async function activate(context: vscode.ExtensionContext) {
 		// Get selected code and strip out whitespace and lower case all tokens
 		var code = document.getText(selection);
 		const tree = parser.parse(code);
-		const voidMethod = isVoid(tree);
-		const paramNames = getParams(tree);
+		const method = isMethod(tree.rootNode.toString());
+		let isVoid = false;
+		let paramNames = new Array();
+		if (method) {
+			console.log('This is a method!');
+			isVoid = isVoidMethod(tree);
+			paramNames = getParams(tree);
+		} else { console.log('This is a code snippet'); }
+
+
 
 		code = code.split(/[\s]+/).join(' ').toLowerCase();
 
@@ -105,11 +130,11 @@ export async function activate(context: vscode.ExtensionContext) {
 			);
 		}
 
-		genComment(code, paramNames, voidMethod, String(url), editor, selection);
+		genComment(code, method, paramNames, isVoid, String(url), editor, selection);
 	});
 
 	context.subscriptions.push(disposable);
 }
 
 // this method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate() { }
