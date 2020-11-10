@@ -2,6 +2,7 @@
 // Import the module and reference it with the alias vscode in your code below
 import axios from "axios";
 import * as vscode from 'vscode';
+import * as path from 'path';
 // Thanks to George Fraser's for how to use tree-sitter with his tree-sitter vscode lib: https://github.com/georgewfraser/vscode-tree-sitter
 import * as Parser from 'web-tree-sitter';
 const initParser = Parser.init();
@@ -35,7 +36,7 @@ function genComment(code: string, method: boolean, paramNames: Array<string>, is
 					let comment = '';
 
 					if (method) {
-						comment = '/**\n' + ' '.repeat(selection.start.character) + ' *' + response.data + '\n';
+						comment = '/**\n' + ' '.repeat(selection.start.character) + ' *' + response.data + '\n' + ' '.repeat(selection.start.character) + ' *\n';
 						for (let i = 0; i < paramNames.length; i++) {
 							comment += ' '.repeat(selection.start.character) + ' * @param ' + paramNames[i] + '\n';
 						}
@@ -52,35 +53,35 @@ function genComment(code: string, method: boolean, paramNames: Array<string>, is
 		});
 }
 
-function isMethod(treeString: string) {
-	console.log(treeString);
-	const idxFormalParams = treeString.indexOf('(formal_parameter');
-	if (idxFormalParams === -1) { return false; }
-
-	const idxClassBody = treeString.indexOf('class_body');
-	if (idxClassBody === -1) { return true; }
-	else if (idxClassBody < idxFormalParams) { return false; }
-	else { return true; }
-}
-
-function isVoidMethod(tree: Parser.Tree) {
-	let signature = tree.rootNode.children[0].children[0];
-	for (let i = 0; i < signature.children.length; i++) {
-		if (signature.children[i].type === 'void_type') {
-			return true;
-		}
+function isMethod(tree: Parser.Tree, lang: Parser.Language) {
+	const query1 = lang.query('(method_declaration name: (identifier) @function.method)');
+	const matches1 = query1.matches(tree.rootNode);
+	if (matches1.length === 1) {
+		const query2 = lang.query('(ERROR (identifier) @function.method)');
+		const matches2 = query2.matches(tree.rootNode);
+		if (matches2.length === 1) { return false; }
+		return true;
 	}
-
-	return false;
+	else { return false; }
 }
 
-function getParams(tree: Parser.Tree) {
-	let params = tree.rootNode.children[1].children[0];
+function isVoidMethod(tree: Parser.Tree, lang: Parser.Language) {
+	const query = lang.query('(local_variable_declaration type: (void_type) @function.method)');
+	const matches = query.matches(tree.rootNode);
+	if (matches.length === 1) { return true; }
+	else { return false; }
+}
+
+// To get access to the .query, you need to download the correct tree-sitter-web.d.ts
+// from: https://github.com/tree-sitter/tree-sitter/blob/master/lib/binding_web/tree-sitter-web.d.ts
+function getParams(code: string, tree: Parser.Tree, lang: Parser.Language) {
+	const query = lang.query('(formal_parameter name: (identifier) @function.method)');
+	const matches = query.matches(tree.rootNode);
 	let paramNames = new Array();
-	for (let i = 0; i < params.children.length; i++) {
-		if (params.children[i].type === 'formal_parameter') {
-			paramNames.push(params.children[i].children[1].text);
-		}
+	for (let i = 0; i < matches.length; i++) {
+		const start = matches[i].captures[0].node.startIndex;
+		const end = matches[i].captures[0].node.endIndex;
+		paramNames.push(code.slice(start, end));
 	}
 
 	return paramNames;
@@ -96,7 +97,8 @@ export async function activate(context: vscode.ExtensionContext) {
 			return; // No open text editor
 		}
 
-		const lang = await Parser.Language.load('./src/tree-sitter-java.wasm');
+		const absolute = path.join(context.extensionPath, 'parsers', 'tree-sitter-java' + '.wasm');
+		const lang = await Parser.Language.load(absolute);
 		const parser = new Parser();
 		parser.setLanguage(lang);
 
@@ -105,15 +107,17 @@ export async function activate(context: vscode.ExtensionContext) {
 		const selection = editor.selection;
 
 		// Get selected code and strip out whitespace and lower case all tokens
-		var code = document.getText(selection);
+		let code = document.getText(selection);
+		code = 'public class temp {' + code + '}';
+		console.log(code);
 		const tree = parser.parse(code);
-		const method = isMethod(tree.rootNode.toString());
+		const method = isMethod(tree, lang); //tree.rootNode.toString());
 		let isVoid = false;
 		let paramNames = new Array();
 		if (method) {
 			console.log('This is a method!');
-			isVoid = isVoidMethod(tree);
-			paramNames = getParams(tree);
+			isVoid = isVoidMethod(tree, lang);
+			paramNames = getParams(code, tree, lang);
 		} else { console.log('This is a code snippet'); }
 
 
