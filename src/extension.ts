@@ -5,21 +5,78 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 // Thanks to George Fraser's for how to use tree-sitter with his tree-sitter vscode lib: https://github.com/georgewfraser/vscode-tree-sitter
 import * as Parser from 'web-tree-sitter';
-const initParser = Parser.init();
 
-async function loadLang() {
+const MSG = 'AUTO-GENERATED COMMENT PLEASE VERIFY AND UPDATE';
+
+/**
+ * Generate and setup the parser for a specific language
+ * @param context the current context of the VSCode extension
+ * @return {Promise<Parser>}
+ */
+async function getParser(context: vscode.ExtensionContext): Promise<Parser> {
+	await Parser.init();
+	const absolute = path.join(context.extensionPath, 'parsers', 'tree-sitter-java' + '.wasm');
 	const parser = new Parser;
-	const java = await Parser.Language.load('./tree-sitter-java.wasm');
-	parser.setLanguage(java);
-
+	const lang = await Parser.Language.load(absolute);
+	parser.setLanguage(lang);
 	return parser;
 }
 
-function genComment(code: string, method: boolean, paramNames: Array<string>, isVoid: boolean, url: string, editor: vscode.TextEditor, selection: vscode.Selection) {
+/**
+ * Properly construct a method comment using the predict comment from the model
+ * @param {string} cmt the predicted comment from the model
+ * @param {Array<string>} paramNames array of parameter names to add to the docstring
+ * @param {boolean} isVoid whether to add the return JavaDoc annotation
+ * @param {string} alignChars characters to add to the beginning of the comment to properly indent it
+ * @return {string} the method comment
+ */
+function genMethodComment(
+	cmt: string, paramNames: Array<string>, isVoid: boolean, alignChars: string
+): string {
+	let mthdCmt = `/** ${MSG}\n${alignChars} *${cmt}\n${alignChars} *\n`;
+	for (let i = 0; i < paramNames.length; i++) {
+		mthdCmt += `${alignChars} * @param ${paramNames[i]}\n`;
+	}
+	if (!isVoid) {
+		mthdCmt += `${alignChars} * @return STUB PLEASE FILL IN\n`;
+	}
+	mthdCmt += `${alignChars} */\n`;
+
+	return mthdCmt;
+}
+
+/**
+ * Properly construct an inline comment using the predict comment from the model
+ * @param {string} cmt the predicted comment from the model
+ * @param {string} alignChars characters to add to the beginning of the comment to properly indent it
+ * @return {string} the inline comment
+ */
+function genInlineComment(cmt: string, alignChars: string): string {
+	let inlineCmt = `// ${MSG}\n`;
+	inlineCmt += `${alignChars}//${cmt}\n`;
+
+	return inlineCmt;
+}
+
+/**
+ * Generate the comment for the given highlighted code
+ * @param code the code to send to the server to have the model generate the comment for
+ * @param isMthd whether the given code is a method or code snippet
+ * @param paramNames array of parameter names to add to the docstring if it is a method
+ * @param isVoid whether to add the return docstring annotation
+ * @param url the url to send the code to
+ * @param editor the current editor to make sure the editor is still open
+ * @param selection the highlighted selection in the editor to determine how far to indent
+ */
+function genComment(
+	code: string, isMthd: boolean, paramNames: Array<string>,
+	isVoid: boolean, url: string, editor: vscode.TextEditor, selection: vscode.Selection
+) {
 	if (!editor) {
 		return;
 	}
 
+	const alignChars = ' '.repeat(selection.start.character);
 	// Construct POST request
 	const headers = {
 		// eslint-disable-next-line @typescript-eslint/naming-convention
@@ -33,40 +90,44 @@ function genComment(code: string, method: boolean, paramNames: Array<string>, is
 			// Take response from server and place generated comment above the highlighted code
 			if (editor) {
 				editor.edit(editBuilder => {
-					let comment = '';
-
-					if (method) {
-						comment = '/**\n' + ' '.repeat(selection.start.character) + ' *' + response.data + '\n' + ' '.repeat(selection.start.character) + ' *\n';
-						for (let i = 0; i < paramNames.length; i++) {
-							comment += ' '.repeat(selection.start.character) + ' * @param ' + paramNames[i] + '\n';
-						}
-						if (!isVoid) {
-							comment += ' '.repeat(selection.start.character) + ' * @return \n';
-						}
-						comment += ' '.repeat(selection.start.character) + '*/\n';
+					let cmt;
+					if (isMthd) {
+						cmt = genMethodComment(response.data, paramNames, isVoid, alignChars);
 					} else {
-						comment = '//' + response.data + '\n';
+						cmt = genInlineComment(response.data, alignChars);
 					}
-					editBuilder.insert(selection.start, comment + ' '.repeat(selection.start.character));
+					editBuilder.insert(selection.start, cmt + ' '.repeat(selection.start.character));
 				});
 			}
 		});
 }
 
-function isMethod(tree: Parser.Tree, lang: Parser.Language) {
+/**
+ * Determine if the given AST tree is a method
+ * @param {Parser.Tree} tree the AST tree to check is a method
+ * @param {Parser.Language} lang the Parser.Language object for building the query to check if a tree is a method
+ * @return {boolean} whether or not the given AST tree is a method
+ */
+function isMethod(tree: Parser.Tree, lang: Parser.Language): boolean {
 	const query1 = lang.query('(method_declaration name: (identifier) @function.method)');
 	const matches1 = query1.matches(tree.rootNode);
 	if (matches1.length === 1) {
 		const query2 = lang.query('(ERROR (identifier) @function.method)');
 		const matches2 = query2.matches(tree.rootNode);
-		if (matches2.length === 1) { return false; }
+		if (matches2.length >= 1) { return false; }
 		return true;
 	}
 	else { return false; }
 }
 
-function isVoidMethod(tree: Parser.Tree, lang: Parser.Language) {
-	const query = lang.query('(local_variable_declaration type: (void_type) @function.method)');
+/**
+ * Determine if the given AST tree is a void method
+ * @param {Parser.Tree} tree the AST tree to check is a void method
+ * @param {Parser.Language} lang the Parser.Language object for building the query to check if a tree is a void method
+ * @return {boolean} whether or not the given AST tree is a void method
+ */
+function isVoidMethod(tree: Parser.Tree, lang: Parser.Language): boolean {
+	const query = lang.query('(method_declaration type: (void_type) @function.method)');
 	const matches = query.matches(tree.rootNode);
 	if (matches.length === 1) { return true; }
 	else { return false; }
@@ -74,14 +135,21 @@ function isVoidMethod(tree: Parser.Tree, lang: Parser.Language) {
 
 // To get access to the .query, you need to download the correct tree-sitter-web.d.ts
 // from: https://github.com/tree-sitter/tree-sitter/blob/master/lib/binding_web/tree-sitter-web.d.ts
-function getParams(code: string, tree: Parser.Tree, lang: Parser.Language) {
+/**
+ * Get the parameter names of the given method
+ * @param {string} mthd the method to get the parameters from
+ * @param {Parser.Tree} tree the AST tree to query to get the location of the parameters from
+ * @param {Parser.Language} lang the Parser.Language object for building the query to get the location of the parameters from
+ * @return {Array<string>} array of strings containing the parameter names of the given method
+ */
+function getParams(mthd: string, tree: Parser.Tree, lang: Parser.Language): Array<any> {
 	const query = lang.query('(formal_parameter name: (identifier) @function.method)');
 	const matches = query.matches(tree.rootNode);
 	let paramNames = new Array();
 	for (let i = 0; i < matches.length; i++) {
 		const start = matches[i].captures[0].node.startIndex;
 		const end = matches[i].captures[0].node.endIndex;
-		paramNames.push(code.slice(start, end));
+		paramNames.push(mthd.slice(start, end));
 	}
 
 	return paramNames;
@@ -90,6 +158,8 @@ function getParams(code: string, tree: Parser.Tree, lang: Parser.Language) {
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
 export async function activate(context: vscode.ExtensionContext) {
+	const parser = await getParser(context);
+	const lang = parser.getLanguage();
 	// Summarize a highlighted code snippet
 	let disposable = vscode.commands.registerCommand('code-summarizer.summarize', async () => {
 		const editor = vscode.window.activeTextEditor;
@@ -97,32 +167,17 @@ export async function activate(context: vscode.ExtensionContext) {
 			return; // No open text editor
 		}
 
-		const absolute = path.join(context.extensionPath, 'parsers', 'tree-sitter-java' + '.wasm');
-		const lang = await Parser.Language.load(absolute);
-		const parser = new Parser();
-		parser.setLanguage(lang);
-
-
 		const document = editor.document;
 		const selection = editor.selection;
 
 		// Get selected code and strip out whitespace and lower case all tokens
 		let code = document.getText(selection);
 		code = 'public class temp {' + code + '}';
-		console.log(code);
 		const tree = parser.parse(code);
-		const method = isMethod(tree, lang); //tree.rootNode.toString());
-		let isVoid = false;
 		let paramNames = new Array();
-		if (method) {
-			console.log('This is a method!');
-			isVoid = isVoidMethod(tree, lang);
+		if (isMethod(tree, lang)) {
 			paramNames = getParams(code, tree, lang);
-		} else { console.log('This is a code snippet'); }
-
-
-
-		code = code.split(/[\s]+/).join(' ').toLowerCase();
+		}
 
 		var url = vscode.workspace.getConfiguration().get('code-summarizer.url');
 		if (!url) {
@@ -134,7 +189,12 @@ export async function activate(context: vscode.ExtensionContext) {
 			);
 		}
 
-		genComment(code, method, paramNames, isVoid, String(url), editor, selection);
+		code = code.split(/[\s]+/).join(' ').toLowerCase();
+		genComment(
+			code, isMethod(tree, lang), paramNames,
+			isVoidMethod(tree, lang), String(url),
+			editor, selection
+		);
 	});
 
 	context.subscriptions.push(disposable);
